@@ -1,0 +1,214 @@
+#!/usr/bin/ruby -Ku
+require 'optparse'
+require 'erb'
+
+class WLANOp
+  PATH_PREFIX="/tmp/conf"
+  SECURITY_NONE="none"
+  SECURITY_WEP="wep"
+  SECURITY_WPA_PSK_AES="wpa-psk-aes"
+  SECURITY_WPA_PSK_TKIP="wpa-psk-tkip"
+  SECURITY_WPA_EAP_AES="wpa-eap-aes"
+  SECURITY_WPA_EAP_TKIP="wpa-eap-tkip"
+
+  # wpa_supplicant param
+  WPA_PSK="WPA-PSK"
+  PW_TKIP="TKIP"
+  PW_AES="CCMP"
+  GROUP_TKIP="TKIP"
+  GROUP_AES="CCMP"
+  TEMPLATE_PSK=<<"TEMPLATE_END"
+network={
+proto=WPA2
+key_mgmt=<%= @sup_key_mgmt %>
+pairwise=<%= @sup_pairwise %>
+group=<%= @sup_group %>
+ssid="<%= @sup_ssid %>"
+psk="<%= @sup_psk %>"
+}
+TEMPLATE_END
+
+  BGEXEC="-B"
+
+  def self.default_options
+    {
+      :ifname => "wlan0",
+      :essid => nil,
+      :security => "wpa-psk-aes",
+      :passphrase => nil,
+
+      :static => false,
+      :background => false,
+    }
+  end
+
+  def initialize args={}
+    @ifname = args[:ifname]
+    @essid = args[:essid]
+    @security = args[:security]
+    @pass = args[:passphrase]
+
+    @use_dhcp = !args[:static]
+    @use_bg = args[:background]
+
+    @sup_key_mgmt = nil
+    @sup_pairwise = nil
+    @sup_group = nil
+    @sup_ssid = nil
+    @sup_psk = nil
+
+    validate_and_set
+  end
+
+  def validate_and_set
+    if @ifname == nil or @essid == nil or @security == nil
+      raise "ERROR: requires IFNAME and ESSID and SECURITY to be valid"
+    end
+    case @security
+    when SECURITY_NONE
+      # ok
+  # when SECURITY_WEP
+  #   if @pass == nil or (@pass.length != 5 and @pass.length == 13)
+  #     raise "ERROR: #{SECURITY_WEP} requires valid pass ('#{@pass}')"
+  #   end
+    when SECURITY_WPA_PSK_AES, SECURITY_WPA_PSK_TKIP
+      if @pass == nil or (@pass.length < 8 or @pass.length > 63)
+        raise "ERROR: #{@security} requires valid passphrase ('#{@pass}')"
+      end
+      @sup_key_mgmt=WPA_PSK
+      @sup_pairwise = @security == SECURITY_WPA_PSK_AES ? PW_AES : PW_TKIP
+      @sup_group = @security == SECURITY_WPA_PSK_AES ? GROUP_AES : GROUP_TKIP
+      @sup_ssid = @essid
+      @sup_psk = @pass
+    else
+      raise "ERROR: #{@security} not supported"
+    end
+  end
+
+  def use_dhcp val
+    @use_dhcp = val == true
+  end
+
+  def use_background val
+    @use_bg = val == true
+  end
+
+  def connect
+    @path = generate_config_file()
+    do_connect(@path)
+  end
+
+  def generate_config_file()
+    basename = generate_config_basename(@ifname)
+    config = ""
+
+    case @security
+    when SECURITY_NONE
+      # do noghint
+    when SECURITY_WPA_PSK_AES, SECURITY_WPA_PSK_TKIP
+      erb = ERB.new(TEMPLATE_PSK)
+      config = erb.result(binding)
+    else
+      raise "ERROR: #{@security} not supported"
+    end
+    return write_config_file(basename, config)
+  rescue => e
+    print "ERROR: failed to generate_config_file (#{e})\n"
+    raise ""
+  end
+
+  def write_config_file(basename, config)
+    unless Dir.exists?(PATH_PREFIX)
+      raise "ERROR: cannot save config file (regular file exists!!!)" if File.exists?(PATH_PREFIX)
+      Dir.mkdir(PATH_PREFIX)
+    end
+    path = generate_config_path(basename)
+    File.open(path, "w") do |file|
+      file.write config
+    end
+    return path
+  end
+
+  def generate_config_basename(ifname)
+    return "wpa_supplicant.#{ifname}.conf"
+  end
+
+  def generate_config_path(basename)
+    return "#{PATH_PREFIX}/#{basename}"
+  end
+
+  def do_connect(path)
+
+    case @security
+    when SECURITY_NONE
+      do_exec("iwconfig #{@ifname} key open")
+      do_exec("ifconfig #{@ifname} up")
+    when SECURITY_WPA_PSK_AES, SECURITY_WPA_PSK_TKIP
+      bg = @use_bg == true ? BGEXEC : ""
+      do_exec("wpa_supplicant -Dnl80211 -i #{@ifname} -c #{path} #{bg} -P /var/run/wpa_supplicant.#{@ifname}.pid -d")
+    else
+      raise "DO_CONNECT: #{@security} not supported"
+    end
+
+    return true
+  end
+
+  def do_exec command
+    print "EXECUTE > #{command}\n"
+    system(command)
+  end
+end
+
+if __FILE__ == $0
+
+  opt = OptionParser.new
+  OPTS = WLANOp.default_options
+
+  opt.on("-S", "--static", "static address") {|v|
+    OPTS[:static] = true
+  }
+
+  opt.on("-b", "--background", "background execution") {|v|
+    OPTS[:background] = true
+  }
+
+  opt.on("-i", "--ifname [IFNAME]", "interface") {|v|
+    OPTS[:ifname] = v
+  }
+
+  opt.on("-e", "--essid [ESSID]", "SSID(ESSID) to connect") {|v|
+    OPTS[:essid] = v
+  }
+
+  opt.on("-s", "--security [SECURITY]", "security method") {|v|
+    OPTS[:security] = v
+  }
+
+  opt.on("-p", "--passphrase [PASSPHRASE]", "passphrase") {|v|
+    OPTS[:passphrase] = v
+  }
+
+  (class<<self;self;end).module_eval do
+    define_method(:usage) do |msg|
+      puts opt.to_s
+      puts "error: #{msg}" if msg
+      exit 1
+    end
+  end
+
+  begin
+    rest = opt.parse(ARGV)
+    if rest.length != 0
+      usage nil
+    end
+  rescue
+    usage $!.to_s
+  end
+
+  wlanop = WLANOp.new(OPTS)
+
+  wlanop.use_dhcp(OPTS[:static] == false)
+  wlanop.use_background(OPTS[:background])
+
+  wlanop.connect()
+end
