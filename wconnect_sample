@@ -1,0 +1,3 @@
+#!/bin/sh
+# SSID as $1
+sudo ~/bin/wlanop -i wlp2s0 -e $1 -s wpa-psk-aes -p PASSPHRASE
